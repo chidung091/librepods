@@ -373,6 +373,15 @@ class RadareOffsetFinder(context: Context) {
                 Log.e(TAG, "Extract command failed with exit code $exitCode")
             }
 
+            // Some Android tar implementations return non-zero after payload extraction
+            // when restoring metadata (owner/mtime) on read-only paths like "/".
+            // Accept success if all expected files are present after attempted extraction.
+            if (checkIfAlreadyExtracted()) {
+                lastExtractionError = null
+                Log.w(TAG, "Tar returned non-zero, but extracted files are present; continuing")
+                return@withContext true
+            }
+
             lastExtractionError = if (extractErrors.isNotEmpty()) {
                 extractErrors.joinToString("\n")
             } else {
