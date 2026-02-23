@@ -140,6 +140,7 @@ class RadareOffsetFinder(context: Context) {
     }
 
     private val radare2TarballFile = File(context.cacheDir, "radare2.tar.gz")
+    private var lastExtractionError: String? = null
 
     private val _progressState = MutableStateFlow<ProgressState>(ProgressState.Idle)
     val progressState: StateFlow<ProgressState> = _progressState
@@ -156,6 +157,33 @@ class RadareOffsetFinder(context: Context) {
         object Cleaning : ProgressState()
         data class Error(val message: String) : ProgressState()
         data class Success(val offset: Long) : ProgressState()
+    }
+
+    private fun buildExtractFailureMessage(): String {
+        val details = lastExtractionError?.trim().orEmpty()
+        return if (details.isNotEmpty()) {
+            "Failed to extract radare2 tarball\n$details"
+        } else {
+            "Failed to extract radare2 tarball"
+        }
+    }
+
+    private fun summarizeCommandFailure(
+        command: String,
+        exitCode: Int,
+        outputLines: List<String>,
+        errorLines: List<String>
+    ): String {
+        val mergedLines = (errorLines + outputLines)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .takeLast(3)
+
+        return if (mergedLines.isEmpty()) {
+            "$command (exit $exitCode)"
+        } else {
+            "$command (exit $exitCode): ${mergedLines.joinToString(" | ")}"
+        }
     }
 
 
@@ -203,7 +231,7 @@ class RadareOffsetFinder(context: Context) {
 
             _progressState.value = ProgressState.Extracting
             if (!extractRadare2Tarball()) {
-                _progressState.value = ProgressState.Error("Failed to extract radare2 tarball")
+                _progressState.value = ProgressState.Error(buildExtractFailureMessage())
                 Log.e(TAG, "Failed to extract radare2 tarball")
                 return@withContext 0L
             }
@@ -285,6 +313,7 @@ class RadareOffsetFinder(context: Context) {
 
     private suspend fun extractRadare2Tarball(): Boolean = withContext(Dispatchers.IO) {
         try {
+            lastExtractionError = null
             val isAlreadyExtracted = checkIfAlreadyExtracted()
 
             if (isAlreadyExtracted) {
@@ -304,6 +333,7 @@ class RadareOffsetFinder(context: Context) {
                 "tar xvf ${radare2TarballFile.absolutePath} -C $EXTRACT_DIR"
             )
 
+            val extractErrors = mutableListOf<String>()
             for (command in extractCommands) {
                 Log.d(TAG, "Running extract command: $command")
                 val process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
@@ -311,27 +341,47 @@ class RadareOffsetFinder(context: Context) {
                 val reader = BufferedReader(InputStreamReader(process.inputStream))
                 val errorReader = BufferedReader(InputStreamReader(process.errorStream))
 
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    Log.d(TAG, "Extract output: $line")
+                val outputLines = mutableListOf<String>()
+                val errorLines = mutableListOf<String>()
+                while (true) {
+                    val outputLine = reader.readLine() ?: break
+                    outputLines.add(outputLine)
+                    Log.d(TAG, "Extract output: $outputLine")
                 }
 
-                while (errorReader.readLine().also { line = it } != null) {
-                    Log.e(TAG, "Extract error: $line")
+                while (true) {
+                    val errorLine = errorReader.readLine() ?: break
+                    errorLines.add(errorLine)
+                    Log.e(TAG, "Extract error: $errorLine")
                 }
 
                 val exitCode = process.waitFor()
                 if (exitCode == 0) {
+                    lastExtractionError = null
                     Log.d(TAG, "Extraction completed successfully")
                     return@withContext true
                 }
 
+                extractErrors.add(
+                    summarizeCommandFailure(
+                        command = command,
+                        exitCode = exitCode,
+                        outputLines = outputLines,
+                        errorLines = errorLines
+                    )
+                )
                 Log.e(TAG, "Extract command failed with exit code $exitCode")
             }
 
+            lastExtractionError = if (extractErrors.isNotEmpty()) {
+                extractErrors.joinToString("\n")
+            } else {
+                "All extraction commands failed without output"
+            }
             Log.e(TAG, "All extraction commands failed")
             return@withContext false
         } catch (e: Exception) {
+            lastExtractionError = "Extraction exception: ${e.message ?: e.javaClass.simpleName}"
             Log.e(TAG, "Failed to extract radare2", e)
             return@withContext false
         }
@@ -739,7 +789,7 @@ class RadareOffsetFinder(context: Context) {
 
             _progressState.value = ProgressState.Extracting
             if (!extractRadare2Tarball()) {
-                _progressState.value = ProgressState.Error("Failed to extract radare2 tarball")
+                _progressState.value = ProgressState.Error(buildExtractFailureMessage())
                 Log.e(TAG, "Failed to extract radare2 tarball")
                 return@withContext false
             }
