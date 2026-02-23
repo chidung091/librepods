@@ -144,6 +144,8 @@ class RadareOffsetFinder(context: Context) {
 
     private val _progressState = MutableStateFlow<ProgressState>(ProgressState.Idle)
     val progressState: StateFlow<ProgressState> = _progressState
+    private val _debugLogState = MutableStateFlow<List<String>>(emptyList())
+    val debugLogState: StateFlow<List<String>> = _debugLogState
 
     sealed class ProgressState {
         object Idle : ProgressState()
@@ -186,6 +188,24 @@ class RadareOffsetFinder(context: Context) {
         }
     }
 
+    private fun appendDebugLog(message: String, isError: Boolean = false) {
+        val timestamp = (System.currentTimeMillis() / 1000) % 100000
+        val prefix = if (isError) "[E]" else "[I]"
+        val line = "$prefix [$timestamp] $message"
+        _debugLogState.value = (_debugLogState.value + line).takeLast(120)
+        if (isError) {
+            Log.e(TAG, line)
+        } else {
+            Log.d(TAG, line)
+        }
+    }
+
+    private fun resetDebugLog(sessionName: String) {
+        val timestamp = (System.currentTimeMillis() / 1000) % 100000
+        _debugLogState.value = listOf("[I] [$timestamp] $sessionName")
+        Log.d(TAG, "Debug session started: $sessionName")
+    }
+
 
     fun isHookOffsetAvailable(): Boolean {
         Log.d(TAG, "Setup Skipped? " + ServiceManager.getService()?.applicationContext?.getSharedPreferences("settings", Context.MODE_PRIVATE)?.getBoolean("skip_setup", false).toString())
@@ -222,50 +242,64 @@ class RadareOffsetFinder(context: Context) {
 
     suspend fun findOffset(): Long = withContext(Dispatchers.IO) {
         try {
+            resetDebugLog("Offset setup started")
             _progressState.value = ProgressState.Downloading
+            appendDebugLog("Step: downloading radare2 tarball")
             if (!downloadRadare2TarballIfNeeded()) {
                 _progressState.value = ProgressState.Error("Failed to download radare2 tarball")
+                appendDebugLog("Failed to download radare2 tarball", isError = true)
                 Log.e(TAG, "Failed to download radare2 tarball")
                 return@withContext 0L
             }
 
             _progressState.value = ProgressState.Extracting
+            appendDebugLog("Step: extracting radare2 tarball")
             if (!extractRadare2Tarball()) {
                 _progressState.value = ProgressState.Error(buildExtractFailureMessage())
+                appendDebugLog(buildExtractFailureMessage(), isError = true)
                 Log.e(TAG, "Failed to extract radare2 tarball")
                 return@withContext 0L
             }
 
             _progressState.value = ProgressState.MakingExecutable
+            appendDebugLog("Step: setting executable permissions")
             if (!makeExecutable()) {
                 _progressState.value = ProgressState.Error("Failed to make binaries executable")
+                appendDebugLog("Failed to make binaries executable", isError = true)
                 Log.e(TAG, "Failed to make binaries executable")
                 return@withContext 0L
             }
 
             _progressState.value = ProgressState.FindingOffset
+            appendDebugLog("Step: finding Bluetooth function offset")
             val offset = findFunctionOffset()
             if (offset == 0L) {
                 _progressState.value = ProgressState.Error("Failed to find function offset")
+                appendDebugLog("Failed to find function offset", isError = true)
                 Log.e(TAG, "Failed to find function offset")
                 return@withContext 0L
             }
 
             _progressState.value = ProgressState.SavingOffset
+            appendDebugLog("Step: saving offset to system property")
             if (!saveOffset(offset)) {
                 _progressState.value = ProgressState.Error("Failed to save offset")
+                appendDebugLog("Failed to save offset", isError = true)
                 Log.e(TAG, "Failed to save offset")
                 return@withContext 0L
             }
 
             _progressState.value = ProgressState.Cleaning
+            appendDebugLog("Step: cleaning temporary files")
             cleanupExtractedFiles()
 
             _progressState.value = ProgressState.Success(offset)
+            appendDebugLog("Setup finished successfully. Hook offset=0x${offset.toString(16)}")
             return@withContext offset
 
         } catch (e: Exception) {
             _progressState.value = ProgressState.Error("Error: ${e.message}")
+            appendDebugLog("Unexpected error in findOffset: ${e.message}", isError = true)
             Log.e(TAG, "Error in findOffset", e)
             return@withContext 0L
         }
@@ -273,11 +307,13 @@ class RadareOffsetFinder(context: Context) {
 
     private suspend fun downloadRadare2TarballIfNeeded(): Boolean = withContext(Dispatchers.IO) {
         if (radare2TarballFile.exists() && radare2TarballFile.length() > 0) {
+            appendDebugLog("Tarball already exists: ${radare2TarballFile.absolutePath}")
             Log.d(TAG, "Radare2 tarball already downloaded to ${radare2TarballFile.absolutePath}")
             return@withContext true
         }
 
         try {
+            appendDebugLog("Downloading tarball from $RADARE2_URL")
             val url = URL(RADARE2_URL)
             val connection = url.openConnection() as HttpURLConnection
             connection.connectTimeout = 60000
@@ -303,9 +339,11 @@ class RadareOffsetFinder(context: Context) {
             outputStream.close()
             inputStream.close()
 
+            appendDebugLog("Download completed: ${radare2TarballFile.absolutePath}")
             Log.d(TAG, "Download successful to ${radare2TarballFile.absolutePath}")
             return@withContext true
         } catch (e: Exception) {
+            appendDebugLog("Download failed: ${e.message}", isError = true)
             Log.e(TAG, "Failed to download radare2 tarball", e)
             return@withContext false
         }
@@ -317,10 +355,12 @@ class RadareOffsetFinder(context: Context) {
             val isAlreadyExtracted = checkIfAlreadyExtracted()
 
             if (isAlreadyExtracted) {
+                appendDebugLog("Extraction skipped: required files already present")
                 Log.d(TAG, "Radare2 files already extracted correctly, skipping extraction")
                 return@withContext true
             }
 
+            appendDebugLog("Cleaning previous extract dir: $EXTRACT_DIR/data/local/tmp/aln_unzip")
             Log.d(TAG, "Removing existing extract directory")
             Runtime.getRuntime().exec(arrayOf("su", "-c", "rm -rf $EXTRACT_DIR/data/local/tmp/aln_unzip")).waitFor()
 
@@ -329,12 +369,15 @@ class RadareOffsetFinder(context: Context) {
             Log.d(TAG, "Extracting ${radare2TarballFile.absolutePath} to $EXTRACT_DIR")
 
             val extractCommands = listOf(
+                "tar xzofm ${radare2TarballFile.absolutePath} -C $EXTRACT_DIR",
+                "tar xvofm ${radare2TarballFile.absolutePath} -C $EXTRACT_DIR",
                 "tar xzf ${radare2TarballFile.absolutePath} -C $EXTRACT_DIR",
                 "tar xvf ${radare2TarballFile.absolutePath} -C $EXTRACT_DIR"
             )
 
             val extractErrors = mutableListOf<String>()
             for (command in extractCommands) {
+                appendDebugLog("Trying extract command: $command")
                 Log.d(TAG, "Running extract command: $command")
                 val process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
 
@@ -358,6 +401,7 @@ class RadareOffsetFinder(context: Context) {
                 val exitCode = process.waitFor()
                 if (exitCode == 0) {
                     lastExtractionError = null
+                    appendDebugLog("Extract command succeeded: $command")
                     Log.d(TAG, "Extraction completed successfully")
                     return@withContext true
                 }
@@ -370,14 +414,24 @@ class RadareOffsetFinder(context: Context) {
                         errorLines = errorLines
                     )
                 )
+                appendDebugLog("Extract command failed (exit $exitCode): $command", isError = true)
                 Log.e(TAG, "Extract command failed with exit code $exitCode")
             }
 
             // Some Android tar implementations return non-zero after payload extraction
             // when restoring metadata (owner/mtime) on read-only paths like "/".
-            // Accept success if all expected files are present after attempted extraction.
+            // Accept success if required binaries are present after attempted extraction.
+            if (hasRequiredExtractedFiles()) {
+                lastExtractionError = null
+                appendDebugLog("Tar exit non-zero, but required files exist. Continuing")
+                Log.w(TAG, "Tar returned non-zero, but required binaries are present; continuing")
+                return@withContext true
+            }
+
+            // Keep strict verification as fallback for diagnostics.
             if (checkIfAlreadyExtracted()) {
                 lastExtractionError = null
+                appendDebugLog("Tar exit non-zero, strict extraction check passed. Continuing")
                 Log.w(TAG, "Tar returned non-zero, but extracted files are present; continuing")
                 return@withContext true
             }
@@ -387,11 +441,46 @@ class RadareOffsetFinder(context: Context) {
             } else {
                 "All extraction commands failed without output"
             }
+            appendDebugLog(lastExtractionError ?: "All extraction commands failed", isError = true)
             Log.e(TAG, "All extraction commands failed")
             return@withContext false
         } catch (e: Exception) {
             lastExtractionError = "Extraction exception: ${e.message ?: e.javaClass.simpleName}"
+            appendDebugLog(lastExtractionError ?: "Extraction exception", isError = true)
             Log.e(TAG, "Failed to extract radare2", e)
+            return@withContext false
+        }
+    }
+
+    private suspend fun hasRequiredExtractedFiles(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val requiredFiles = listOf(
+                "$RADARE2_BIN_PATH/radare2",
+                "$RADARE2_BIN_PATH/rabin2",
+                "$BUSYBOX_PATH/busybox-arm64",
+                "$BUSYBOX_PATH/xz"
+            )
+
+            for (filePath in requiredFiles) {
+                val fileCheckProcess = Runtime.getRuntime().exec(
+                    arrayOf("su", "-c", "[ -f $filePath ] && echo 'exists'")
+                )
+                val fileExists = BufferedReader(InputStreamReader(fileCheckProcess.inputStream)).readLine() == "exists"
+                fileCheckProcess.waitFor()
+
+                if (!fileExists) {
+                    appendDebugLog("Missing required extracted file: $filePath", isError = true)
+                    Log.d(TAG, "Required extracted file missing: $filePath")
+                    return@withContext false
+                }
+            }
+
+            appendDebugLog("Required extracted files are present")
+            Log.d(TAG, "All required extracted binaries are present")
+            return@withContext true
+        } catch (e: Exception) {
+            appendDebugLog("Error checking required files: ${e.message}", isError = true)
+            Log.e(TAG, "Error checking required extracted files", e)
             return@withContext false
         }
     }
@@ -407,6 +496,11 @@ class RadareOffsetFinder(context: Context) {
             if (!dirExists) {
                 Log.d(TAG, "Extract directory doesn't exist, need to extract")
                 return@withContext false
+            }
+
+            if (hasRequiredExtractedFiles()) {
+                Log.d(TAG, "Required binaries already extracted")
+                return@withContext true
             }
 
             val tarListCommands = listOf(
@@ -478,6 +572,7 @@ class RadareOffsetFinder(context: Context) {
 
     private suspend fun makeExecutable(): Boolean = withContext(Dispatchers.IO) {
         try {
+            appendDebugLog("Applying chmod 755 to extracted binaries")
             Log.d(TAG, "Making binaries executable in $RADARE2_BIN_PATH")
             val chmod1Result = Runtime.getRuntime().exec(
                 arrayOf("su", "-c", "chmod -R 755 $RADARE2_BIN_PATH")
@@ -490,13 +585,16 @@ class RadareOffsetFinder(context: Context) {
             ).waitFor()
 
             if (chmod1Result == 0 && chmod2Result == 0) {
+                appendDebugLog("chmod succeeded for radare2 and busybox")
                 Log.d(TAG, "Successfully made binaries executable")
                 return@withContext true
             } else {
+                appendDebugLog("chmod failed with exit codes: $chmod1Result, $chmod2Result", isError = true)
                 Log.e(TAG, "Failed to make binaries executable, exit codes: $chmod1Result, $chmod2Result")
                 return@withContext false
             }
         } catch (e: Exception) {
+            appendDebugLog("chmod failed: ${e.message}", isError = true)
             Log.e(TAG, "Error making binaries executable", e)
             return@withContext false
         }
@@ -504,6 +602,7 @@ class RadareOffsetFinder(context: Context) {
 
     private suspend fun findFunctionOffset(): Long = withContext(Dispatchers.IO) {
         val libraryPath = findBluetoothLibraryPath() ?: return@withContext 0L
+        appendDebugLog("Using Bluetooth library: $libraryPath")
         var offset = 0L
 
         try {
@@ -542,6 +641,7 @@ class RadareOffsetFinder(context: Context) {
 
             val exitCode = process.waitFor()
             if (exitCode != 0) {
+                appendDebugLog("rabin2 failed with exit code $exitCode", isError = true)
                 Log.e(TAG, "rabin2 command failed with exit code $exitCode")
             }
 
@@ -557,10 +657,12 @@ class RadareOffsetFinder(context: Context) {
         }
 
         if (offset == 0L) {
+            appendDebugLog("Function offset not found in rabin2 output", isError = true)
             Log.e(TAG, "Failed to extract function offset from output, aborting")
             return@withContext 0L
         }
 
+        appendDebugLog("Function offset found: 0x${offset.toString(16)}")
         Log.d(TAG, "Successfully found offset: 0x${offset.toString(16)}")
         return@withContext offset
     }
@@ -748,6 +850,7 @@ class RadareOffsetFinder(context: Context) {
     private suspend fun saveOffset(offset: Long): Boolean = withContext(Dispatchers.IO) {
         try {
             val hexString = "0x${offset.toString(16)}"
+            appendDebugLog("Saving hook offset: $hexString")
             Log.d(TAG, "Saving offset to system property: $hexString")
 
             val process = Runtime.getRuntime().exec(arrayOf(
@@ -763,16 +866,20 @@ class RadareOffsetFinder(context: Context) {
                 verifyProcess.waitFor()
 
                 if (propValue != null && propValue.isNotEmpty()) {
+                    appendDebugLog("Hook offset saved and verified: $propValue")
                     Log.d(TAG, "Successfully saved offset to system property: $propValue")
                     return@withContext true
                 } else {
+                    appendDebugLog("Hook offset set but verification failed", isError = true)
                     Log.e(TAG, "Property was set but couldn't be verified")
                 }
             } else {
+                appendDebugLog("setprop failed with exit code: $exitCode", isError = true)
                 Log.e(TAG, "Failed to set property, exit code: $exitCode")
             }
             return@withContext false
         } catch (e: Exception) {
+            appendDebugLog("Error saving offset: ${e.message}", isError = true)
             Log.e(TAG, "Failed to save offset", e)
             return@withContext false
         }
@@ -781,39 +888,50 @@ class RadareOffsetFinder(context: Context) {
     private fun cleanupExtractedFiles() {
         try {
             Runtime.getRuntime().exec(arrayOf("su", "-c", "rm -rf $EXTRACT_DIR/data/local/tmp/aln_unzip")).waitFor()
+            appendDebugLog("Temporary extraction directory removed")
             Log.d(TAG, "Cleaned up extracted files at $EXTRACT_DIR/data/local/tmp/aln_unzip")
         } catch (e: Exception) {
+            appendDebugLog("Failed cleanup: ${e.message}", isError = true)
             Log.e(TAG, "Failed to cleanup extracted files", e)
         }
     }
 
     suspend fun findSdpOffset(): Boolean = withContext(Dispatchers.IO) {
         try {
+            resetDebugLog("SDP offset setup started")
             _progressState.value = ProgressState.Downloading
+            appendDebugLog("Step: downloading radare2 tarball")
             if (!downloadRadare2TarballIfNeeded()) {
                 _progressState.value = ProgressState.Error("Failed to download radare2 tarball")
+                appendDebugLog("Failed to download radare2 tarball", isError = true)
                 Log.e(TAG, "Failed to download radare2 tarball")
                 return@withContext false
             }
 
             _progressState.value = ProgressState.Extracting
+            appendDebugLog("Step: extracting radare2 tarball")
             if (!extractRadare2Tarball()) {
                 _progressState.value = ProgressState.Error(buildExtractFailureMessage())
+                appendDebugLog(buildExtractFailureMessage(), isError = true)
                 Log.e(TAG, "Failed to extract radare2 tarball")
                 return@withContext false
             }
 
             _progressState.value = ProgressState.MakingExecutable
+            appendDebugLog("Step: setting executable permissions")
             if (!makeExecutable()) {
                 _progressState.value = ProgressState.Error("Failed to make binaries executable")
+                appendDebugLog("Failed to make binaries executable", isError = true)
                 Log.e(TAG, "Failed to make binaries executable")
                 return@withContext false
             }
 
             _progressState.value = ProgressState.FindingOffset
+            appendDebugLog("Step: finding Bluetooth library for SDP offset")
             val libraryPath = findBluetoothLibraryPath()
             if (libraryPath == null) {
                 _progressState.value = ProgressState.Error("Failed to find Bluetooth library")
+                appendDebugLog("Failed to find Bluetooth library", isError = true)
                 Log.e(TAG, "Failed to find Bluetooth library")
                 return@withContext false
             }
@@ -826,15 +944,19 @@ class RadareOffsetFinder(context: Context) {
             """.trimIndent()
 
             findAndSaveSdpOffset(libraryPath, envSetup)
+            appendDebugLog("SDP offset lookup completed")
 
             _progressState.value = ProgressState.Cleaning
+            appendDebugLog("Step: cleaning temporary files")
             cleanupExtractedFiles()
 
             _progressState.value = ProgressState.Success(0L)
+            appendDebugLog("SDP setup finished successfully")
             return@withContext true
 
         } catch (e: Exception) {
             _progressState.value = ProgressState.Error("Error: ${e.message}")
+            appendDebugLog("Unexpected error in findSdpOffset: ${e.message}", isError = true)
             Log.e(TAG, "Error in findSdpOffset", e)
             return@withContext false
         }

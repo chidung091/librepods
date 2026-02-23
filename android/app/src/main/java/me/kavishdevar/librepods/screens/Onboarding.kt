@@ -26,6 +26,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -96,6 +98,8 @@ fun Onboarding(navController: NavController, activityContext: Context) {
 
     val radareOffsetFinder = remember { RadareOffsetFinder(activityContext) }
     val progressState by radareOffsetFinder.progressState.collectAsState()
+    val debugLogs by radareOffsetFinder.debugLogState.collectAsState()
+    val debugScrollState = rememberScrollState()
     var isComplete by remember { mutableStateOf(false) }
     var hasStarted by remember { mutableStateOf(false) }
     var rootCheckPassed by remember { mutableStateOf(false) }
@@ -152,6 +156,12 @@ fun Onboarding(navController: NavController, activityContext: Context) {
     LaunchedEffect(progressState) {
         if (progressState is RadareOffsetFinder.ProgressState.Success) {
             isComplete = true
+        }
+    }
+
+    LaunchedEffect(debugLogs.size, hasStarted) {
+        if (hasStarted) {
+            debugScrollState.scrollTo(debugScrollState.maxValue)
         }
     }
     val backdrop = rememberLayerBackdrop()
@@ -310,6 +320,51 @@ fun Onboarding(navController: NavController, activityContext: Context) {
                                     color = textColor.copy(alpha = 0.7f)
                                 )
                             )
+                        }
+
+                        if (hasStarted) {
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            val debugTextColor = if (isDarkTheme) Color(0xFFE5E5EA) else Color(0xFF1C1C1E)
+
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(180.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (isDarkTheme) Color(0xFF2C2C2E) else Color(0xFFF2F2F7)
+                                ),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .verticalScroll(debugScrollState)
+                                        .padding(12.dp)
+                                ) {
+                                    Text(
+                                        text = "Debug logs",
+                                        style = TextStyle(
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontFamily = FontFamily(Font(R.font.sf_pro)),
+                                            color = debugTextColor.copy(alpha = 0.95f)
+                                        )
+                                    )
+
+                                    Spacer(modifier = Modifier.height(8.dp))
+
+                                    Text(
+                                        text = if (debugLogs.isEmpty()) "No logs yet" else debugLogs.joinToString("\n"),
+                                        style = TextStyle(
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Normal,
+                                            fontFamily = FontFamily(Font(R.font.sf_pro)),
+                                            color = debugTextColor.copy(alpha = 0.85f)
+                                        )
+                                    )
+                                }
+                            }
                         }
 
                         Spacer(modifier = Modifier.height(24.dp))
@@ -640,4 +695,3 @@ private fun getStatusDescription(
 fun OnboardingPreview() {
     Onboarding(navController = NavController(LocalContext.current), activityContext = LocalContext.current)
 }
-
