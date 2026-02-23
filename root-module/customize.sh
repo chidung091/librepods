@@ -37,9 +37,26 @@ set_perm "$XZ" 0 0 755
 
 # The bundled radare2 is a custom build that works without Termux: https://github.com/devnoname120/radare2/releases/tag/5.9.8-android-aln
 ui_print "Extracting radare2 to /data/local/tmp/aln_unzip..."
-$BUSYBOX tar xf "$UNZIP_DIR/radare2-5.9.9-android-aarch64-aln.tar.gz" -C / || {
-    abort "Failed to extract "$UNZIP_DIR/radare2-5.9.9-android-aarch64-aln.tar.gz"."
-}
+RADARE2_ARCHIVE="$UNZIP_DIR/radare2-5.9.9-android-aarch64-aln.tar.gz"
+if [ ! -f "$RADARE2_ARCHIVE" ]; then
+    LEGACY_ARCHIVE="$UNZIP_DIR/radare2-5.9.9-android-aarch64.tar.gz"
+    if [ -f "$LEGACY_ARCHIVE" ]; then
+        RADARE2_ARCHIVE="$LEGACY_ARCHIVE"
+    else
+        for candidate in "$UNZIP_DIR"/radare2-*.tar*; do
+            [ -f "$candidate" ] || continue
+            RADARE2_ARCHIVE="$candidate"
+            break
+        done
+    fi
+fi
+
+[ -f "$RADARE2_ARCHIVE" ] || abort "Could not find radare2 archive in $UNZIP_DIR."
+ui_print "Using archive: $(basename "$RADARE2_ARCHIVE")"
+
+$BUSYBOX tar xzf "$RADARE2_ARCHIVE" -C / || \
+$BUSYBOX tar xf "$RADARE2_ARCHIVE" -C / || \
+abort "Failed to extract $RADARE2_ARCHIVE."
 
 
 if [ "$(uname -m)" = "aarch64" ]; then

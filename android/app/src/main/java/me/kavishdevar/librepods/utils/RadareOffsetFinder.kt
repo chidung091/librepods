@@ -299,30 +299,38 @@ class RadareOffsetFinder(context: Context) {
 
             Log.d(TAG, "Extracting ${radare2TarballFile.absolutePath} to $EXTRACT_DIR")
 
-            val process = Runtime.getRuntime().exec(
-                arrayOf("su", "-c", "tar xvf ${radare2TarballFile.absolutePath} -C $EXTRACT_DIR")
+            val extractCommands = listOf(
+                "tar xzf ${radare2TarballFile.absolutePath} -C $EXTRACT_DIR",
+                "tar xvf ${radare2TarballFile.absolutePath} -C $EXTRACT_DIR"
             )
 
-            val reader = BufferedReader(InputStreamReader(process.inputStream))
-            val errorReader = BufferedReader(InputStreamReader(process.errorStream))
+            for (command in extractCommands) {
+                Log.d(TAG, "Running extract command: $command")
+                val process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
 
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                Log.d(TAG, "Extract output: $line")
+                val reader = BufferedReader(InputStreamReader(process.inputStream))
+                val errorReader = BufferedReader(InputStreamReader(process.errorStream))
+
+                var line: String?
+                while (reader.readLine().also { line = it } != null) {
+                    Log.d(TAG, "Extract output: $line")
+                }
+
+                while (errorReader.readLine().also { line = it } != null) {
+                    Log.e(TAG, "Extract error: $line")
+                }
+
+                val exitCode = process.waitFor()
+                if (exitCode == 0) {
+                    Log.d(TAG, "Extraction completed successfully")
+                    return@withContext true
+                }
+
+                Log.e(TAG, "Extract command failed with exit code $exitCode")
             }
 
-            while (errorReader.readLine().also { line = it } != null) {
-                Log.e(TAG, "Extract error: $line")
-            }
-
-            val exitCode = process.waitFor()
-            if (exitCode == 0) {
-                Log.d(TAG, "Extraction completed successfully")
-                return@withContext true
-            } else {
-                Log.e(TAG, "Extraction failed with exit code $exitCode")
-                return@withContext false
-            }
+            Log.e(TAG, "All extraction commands failed")
+            return@withContext false
         } catch (e: Exception) {
             Log.e(TAG, "Failed to extract radare2", e)
             return@withContext false
@@ -342,16 +350,30 @@ class RadareOffsetFinder(context: Context) {
                 return@withContext false
             }
 
-            val tarProcess = Runtime.getRuntime().exec(
-                arrayOf("su", "-c", "tar tf ${radare2TarballFile.absolutePath}")
+            val tarListCommands = listOf(
+                "tar tzf ${radare2TarballFile.absolutePath}",
+                "tar tf ${radare2TarballFile.absolutePath}"
             )
-            val tarFiles = BufferedReader(InputStreamReader(tarProcess.inputStream)).readLines()
-                .filter { it.isNotEmpty() }
-                .map { it.trim() }
-                .toSet()
-            tarProcess.waitFor()
 
-            if (tarFiles.isEmpty()) {
+            var tarFiles = emptySet<String>()
+            var tarListSucceeded = false
+            for (command in tarListCommands) {
+                Log.d(TAG, "Running list command: $command")
+                val tarProcess = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
+                val candidateFiles = BufferedReader(InputStreamReader(tarProcess.inputStream)).readLines()
+                    .filter { it.isNotEmpty() }
+                    .map { it.trim() }
+                    .toSet()
+                val exitCode = tarProcess.waitFor()
+
+                if (exitCode == 0 && candidateFiles.isNotEmpty()) {
+                    tarFiles = candidateFiles
+                    tarListSucceeded = true
+                    break
+                }
+            }
+
+            if (!tarListSucceeded) {
                 Log.e(TAG, "Failed to get file list from tarball")
                 return@withContext false
             }
